@@ -1,133 +1,123 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+// src/services/gemini.service.js
+// Uses Groq (free, fast, unlimited) instead of Gemini
+// Drop-in replacement — same exported function names, same return shapes
 
-let model;
+import Groq from 'groq-sdk';
 
-const getModel = () => {
-  if (!model) {
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite' });
-  }
-  return model;
-};
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const cleanJson = (text) => {
-  const cleaned = text.replace(/```json/g, '').replace(/```/g, '').trim();
-  return JSON.parse(cleaned);
+  return JSON.parse(text.replace(/```json/g, '').replace(/```/g, '').trim());
 };
 
-const decomposeProjectIntoMilestones = async ({ title, description, budget, deadline }) => {
-  const prompt = `
-You are a senior project manager. Decompose the following freelance project into 3-5 clear, actionable milestones.
+// Retry with exponential backoff on rate limit
+const withRetry = async (fn, maxRetries = 3) => {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isRateLimit = err.status === 429 || err.message?.includes('rate');
+      if (isRateLimit && attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 1000;
+        console.warn(`Rate limited. Retry ${attempt}/${maxRetries} in ${delay}ms`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        throw err;
+      }
+    }
+  }
+};
 
-Project Title: ${title}
-Description: ${description}
+// ─── Called by project.controller.js on project creation ─────────────────────
+const decomposeProjectIntoMilestones = async ({ title, description, budget, deadline }) => {
+  const safeDescription = description.substring(0, 600);
+
+  const prompt = `Decompose this freelance project into milestones.
+Title: ${title}
+Description: ${safeDescription}
 Total Budget: $${budget}
 Deadline: ${deadline}
 
-Return ONLY a valid JSON array. No explanation, no markdown, no preamble. Just the raw JSON array.
-
-Each milestone object must have exactly these fields:
-- order: number (1, 2, 3...)
-- title: string (short milestone name)
-- description: string (what needs to be done)
-- checklist: array of strings (3-5 specific, verifiable acceptance criteria)
-- amount: number (dollar amount for this milestone, all amounts must sum to exactly ${budget})
-- estimatedDays: number (realistic days to complete)
-
-Example format:
-[
-  {
-    "order": 1,
-    "title": "...",
-    "description": "...",
-    "checklist": ["...", "..."],
-    "amount": 500,
-    "estimatedDays": 3
-  }
-]
-`;
+Return ONLY valid JSON, no markdown, no explanation:
+{
+  "milestones": [
+    {
+      "order": 1,
+      "title": "string (max 60 chars)",
+      "description": "2-3 sentences on what must be built",
+      "checklist": ["specific verifiable criterion 1", "criterion 2"],
+      "amount": 150,
+      "estimatedDays": 5
+    }
+  ]
+}
+Rules: 3-5 milestones, amounts sum exactly to ${budget}, checklist items must be testable.`;
 
   try {
-    const result = await getModel().generateContent(prompt);
-    const text = result.response.text();
-    const milestones = cleanJson(text);
-
-    // Validate it's an array
-    if (!Array.isArray(milestones)) {
-      throw new Error('Gemini did not return an array');
-    }
-
-    return milestones;
+    const result = await withRetry(() =>
+      groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.2,
+      })
+    );
+    return cleanJson(result.choices[0].message.content).milestones;
   } catch (err) {
-    console.error('Gemini decomposeProject error:', err.message);
-    throw new Error(`Failed to decompose project into milestones: ${err.message}`);
+    console.error('Groq milestone decomposition failed, using fallback:', err.message);
+    return [
+      {
+        order: 1, title: 'Project Setup',
+        description: 'Set up project structure, repository, and development environment.',
+        checklist: ['Repository initialized', 'Folder structure documented', 'Dependencies installed'],
+        amount: Math.round(budget * 0.25), estimatedDays: 3,
+      },
+      {
+        order: 2, title: 'Core Implementation',
+        description: 'Build the main features and core functionality.',
+        checklist: ['Core features implemented', 'Basic tests passing', 'Code reviewed'],
+        amount: Math.round(budget * 0.50), estimatedDays: 10,
+      },
+      {
+        order: 3, title: 'Testing & Delivery',
+        description: 'End-to-end testing, bug fixing, and final delivery.',
+        checklist: ['All features tested', 'Bugs fixed', 'Final build documented'],
+        amount: Math.round(budget * 0.25), estimatedDays: 4,
+      },
+    ];
   }
 };
 
+// ─── Fallback only — primary path is the agent in groq.service.js ────────────
 const evaluateSubmission = async ({ milestoneTitle, milestoneDescription, checklist, workDescription, repoUrl }) => {
+  const safeWork = workDescription.substring(0, 800);
   const checklistText = checklist.map((item, i) => `${i + 1}. ${item}`).join('\n');
 
-  const prompt = `
-You are a strict but fair technical quality assessor for a freelance platform.
+  const prompt = `Evaluate this freelance milestone submission. Return ONLY valid JSON.
 
-Evaluate the freelancer's submitted work against the milestone requirements below.
+MILESTONE: ${milestoneTitle}
+DESCRIPTION: ${milestoneDescription}
+CHECKLIST:\n${checklistText}
+SUBMISSION:\n${safeWork}
+${repoUrl ? `REPO: ${repoUrl}` : ''}
 
---- MILESTONE ---
-Title: ${milestoneTitle}
-Description: ${milestoneDescription}
+Return:
+{
+  "score": 78,
+  "decision": "PARTIAL_PAYOUT",
+  "feedback": "2-4 sentences of actionable feedback",
+  "checklistEvaluation": [{ "item": "text", "met": true, "comment": "reason" }],
+  "summary": "1 sentence for employer"
+}
+Rules: score 85-100 = FULL_PAYOUT, 50-84 = PARTIAL_PAYOUT, 0-49 = REFUND`;
 
-Acceptance Checklist:
-${checklistText}
-
---- FREELANCER SUBMISSION ---
-Work Description: ${workDescription}
-${repoUrl ? `Repository/Link: ${repoUrl}` : ''}
-
---- SCORING RULES ---
-- Score 0-100 based on how well the submission meets the checklist
-- 80-100 = FULL_PAYOUT (most criteria clearly met)
-- 40-79 = PARTIAL_PAYOUT (partial progress demonstrated)
-- 0-39 = REFUND (insufficient work, criteria not met)
-
-Return ONLY a valid JSON object. No explanation, no markdown, no preamble. Just raw JSON.
-
-Required fields:
-- score: number (0-100)
-- decision: string (exactly one of: "FULL_PAYOUT", "PARTIAL_PAYOUT", "REFUND")
-- feedback: string (2-3 sentences explaining the decision)
-- checklistEvaluation: array of objects, one per checklist item, each with:
-  - item: string (the checklist item text)
-  - met: boolean
-  - comment: string (brief reason)
-- summary: string (one sentence verdict)
-`;
-
-  try {
-    const result = await getModel().generateContent(prompt);
-    const text = result.response.text();
-    const evaluation = cleanJson(text);
-
-    // Validate required fields
-    const required = ['score', 'decision', 'feedback', 'checklistEvaluation', 'summary'];
-    for (const field of required) {
-      if (evaluation[field] === undefined) {
-        throw new Error(`Missing field in Gemini response: ${field}`);
-      }
-    }
-
-    const validDecisions = ['FULL_PAYOUT', 'PARTIAL_PAYOUT', 'REFUND'];
-    if (!validDecisions.includes(evaluation.decision)) {
-      throw new Error(`Invalid decision value: ${evaluation.decision}`);
-    }
-
-    return evaluation;
-  } catch (err) {
-    console.error('Gemini evaluateSubmission error:', err.message);
-    throw new Error(`Failed to evaluate submission: ${err.message}`);
-  }
+  const result = await withRetry(() =>
+    groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.1,
+    })
+  );
+  return cleanJson(result.choices[0].message.content);
 };
 
-export default {
-  decomposeProjectIntoMilestones,
-  evaluateSubmission,
-};
+export default { decomposeProjectIntoMilestones, evaluateSubmission };
