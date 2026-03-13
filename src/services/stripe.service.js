@@ -1,7 +1,6 @@
 import Stripe from 'stripe';
 import prisma from '../lib/prisma.js';
 
-// Initialize Stripe using your live/test secret key from Render environment variables
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const createEscrowPaymentIntent = async ({ projectId }) => {
@@ -10,9 +9,7 @@ const createEscrowPaymentIntent = async ({ projectId }) => {
       where: { id: projectId }
     });
 
-    if (!project) {
-      throw new Error("Project not found in database.");
-    }
+    if (!project) throw new Error("Project not found in database.");
 
     const totalCharge = project.budget * 1.02;
     const amountInSmallestUnit = Math.round(totalCharge * 100);
@@ -57,6 +54,7 @@ const confirmEscrowFunded = async ({ projectId, paymentIntentId }) => {
       await tx.transaction.create({
         data: {
           escrowAccountId: escrow.id,
+          userId: project.employerId, // <-- THE PRISMA FIX: Tell the DB who made the transaction!
           type: 'ESCROW_FUND',
           amount: project.budget,
           description: `Funds secured via Stripe Intent ${paymentIntentId}`,
@@ -73,7 +71,8 @@ const confirmEscrowFunded = async ({ projectId, paymentIntentId }) => {
     return updatedEscrow;
   } catch (error) {
     console.error("Database Save Error:", error);
-    throw new Error("Failed to save payment to database.");
+    // THE REAL ERROR FIX: Now Android will actually see Prisma's exact complaint if it fails!
+    throw new Error(error.message);
   }
 };
 
