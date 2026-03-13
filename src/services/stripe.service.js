@@ -4,20 +4,32 @@ import prisma from '../lib/prisma.js';
 // Initialize Stripe using your live/test secret key from Render environment variables
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-const createEscrowPaymentIntent = async ({ projectId, amount, employerEmail }) => {
+const createEscrowPaymentIntent = async ({ projectId }) => {
   try {
-    // Stripe requires the amount to be in the smallest currency unit (paise for INR, cents for USD)
-    const amountInSmallestUnit = Math.round(amount * 100);
+    // 1. SECURE: Fetch the project from the database to get the real budget
+    const project = await prisma.project.findUnique({
+      where: { id: projectId }
+    });
 
-    // Call the REAL Stripe API
+    if (!project) {
+      throw new Error("Project not found");
+    }
+
+    // 2. Add your 2% platform fee so it perfectly matches the Android UI!
+    const totalCharge = project.budget * 1.02;
+
+    // 3. Convert to paise (smallest currency unit for INR)
+    const amountInSmallestUnit = Math.round(totalCharge * 100);
+
+    // 4. Call the REAL Stripe API
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amountInSmallestUnit,
-      currency: 'inr', // Change to 'usd' if your Stripe account is US-based
+      currency: 'inr', 
       metadata: { projectId }
     });
 
     return {
-      clientSecret: paymentIntent.client_secret, // Returns real 'pi_3M..._secret_...'
+      clientSecret: paymentIntent.client_secret, 
       paymentIntentId: paymentIntent.id,
     };
   } catch (error) {
