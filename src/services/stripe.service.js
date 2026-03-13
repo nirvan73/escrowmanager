@@ -42,12 +42,14 @@ const confirmEscrowFunded = async ({ projectId, paymentIntentId }) => {
           status: 'FUNDED',
           stripePaymentIntentId: paymentIntentId,
           heldAmount: project.budget,
+          totalAmount: project.budget // <-- ADDED THIS
         },
         create: {
           projectId,
           status: 'FUNDED',
           stripePaymentIntentId: paymentIntentId,
           heldAmount: project.budget,
+          totalAmount: project.budget // <-- THE FIX THAT SATISFIES PRISMA
         }
       });
 
