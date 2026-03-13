@@ -1,0 +1,74 @@
+This document outlines the end-to-end workflow of the Escrow Manager application, detailing the sequence of events from user registration to project completion and payment.
+
+### 1. User Registration and Authentication
+
+-   **Endpoint**: `POST /api/auth/register`
+-   **Controller**: `src/controllers/auth.controller.js` -> `register`
+-   **Workflow**:
+    1.  A new user (either `EMPLOYER` or `FREELANCER`) provides their name, email, password, and role.
+    2.  The password is encrypted using `bcrypt`.
+    3.  A new `User` record is created in the database.
+    4.  A JSON Web Token (JWT) is generated and returned to the user for authenticating subsequent requests.
+
+### 2. Project Creation and AI-Powered Milestone Decomposition
+
+-   **Endpoint**: `POST /api/projects`
+-   **Controller**: `src/controllers/project.controller.js` -> `createProject`
+-   **Workflow**:
+    1.  An authenticated `EMPLOYER` submits a new project with a title, description, total budget, deadline, and an optional freelancer's email.
+    2.  The system calls the `decomposeProjectIntoMilestones` function in `src/services/gemini.service.js`.
+    3.  This service sends a detailed prompt to the Groq AI model. The prompt includes the project details and instructs the AI to break the project into 3-5 logical milestones.
+    4.  **Crucially, the prompt contains the rule: "amounts sum exactly to [total budget]". This is where the budget division happens.**
+    5.  The AI returns a JSON object containing an array of milestones, each with a title, description, checklist of tasks, an estimated number of days, and a specific `amount` allocated from the total budget.
+    6.  The system creates the `Project` record in the database.
+    7.  It then creates the `Milestone` records returned by the AI, associating them with the new project. If a freelancer was specified, the milestones are assigned to them.
+    8.  An `EscrowAccount` is created for the project with an initial status of `UNFUNDED`.
+
+### 3. Funding the Escrow Account
+
+-   **Endpoint**: `POST /api/escrow/fund` -> `POST /api/escrow/confirm`
+-   **Controller**: `src/controllers/escrow.controller.js` -> `fundEscrow`, `confirmFunding`
+-   **Workflow**:
+    1.  The `EMPLOYER` initiates funding for the project.
+    2.  `stripe.service.js` simulates the creation of a Stripe Payment Intent. In a real application, this would involve communicating with the Stripe API.
+    3.  The employer "confirms" the payment.
+    4.  The `confirmEscrowFunded` function in `stripe.service.js` updates the `EscrowAccount` status to `FUNDED` and records the full project budget in the `heldAmount` field.
+    5.  The `Project` status is updated to `IN_PROGRESS`.
+
+### 4. Milestone Submission and AI-Powered Quality Assurance (AQA)
+
+-   **Endpoint**: `POST /api/milestones/:id/submit`
+-   **Controller**: `src/controllers/milestone.controller.js` -> `submitMilestone`
+-   **Workflow**:
+    1.  The assigned `FREELANCER` submits their work for a specific milestone, providing a description and an optional repository URL.
+    2.  A `Submission` record is created, and the `Milestone` status is set to `UNDER_REVIEW`.
+    3.  The request is completed, and a `202 Accepted` response is sent to the user, indicating that the processing will happen in the background.
+    4.  The `aqa.service.js` -> `processSubmission` function is called asynchronously.
+    5.  This triggers the primary AI agent logic in `src/services/groq.service.js`.
+
+### 5. The Autonomous AI Agent Workflow
+
+-   **Service**: `src/services/groq.service.js` -> `processSubmission`
+-   **Workflow**: This is a multi-step, autonomous process where the AI calls a series of predefined "tools" in a specific order.
+    1.  **System Prompt**: The agent is initialized with a system prompt that defines its role as an "autonomous escrow agent" and instructs it to follow a strict sequence: `score_submission` -> `process_payment` -> `update_reputation`.
+    2.  **Tool Call 1: `score_submission`**:
+        -   The agent evaluates the freelancer's work against the milestone's checklist.
+        -   It generates a score (0-100), a payment decision (`FULL_PAYOUT`, `PARTIAL_PAYOUT`, or `REFUND`), and detailed feedback.
+        -   This result is saved to the `Submission` record in the database.
+    3.  **Tool Call 2: `process_payment`**:
+        -   Based on the decision from the previous step, the agent calls the appropriate function in `stripe.service.js`.
+        -   **Full Payout**: `releaseMilestonePayout` is called. The milestone amount is moved from `heldAmount` to `releasedAmount` in the `EscrowAccount`. The milestone is marked `APPROVED`.
+        -   **Partial Payout**: `releasePartialPayout` is called. A portion of the milestone amount (calculated based on the AQA score) is released, and the remainder is refunded to the employer. The milestone is marked `PARTIAL`.
+        -   **Refund**: `triggerRefund` is called. The entire milestone amount is moved from `heldAmount` to `refundedAmount`. The milestone is marked `FAILED`.
+    4.  **Tool Call 3: `update_reputation`**:
+        -   The agent calls `pfi.service.js` -> `calculateAndUpdatePFI`.
+        -   This service recalculates the freelancer's "Professional Fidelity Index" (PFI), a reputation score based on their performance (milestone accuracy, deadline adherence, average AQA score).
+        -   The new score is saved in the `PFIScore` table.
+    5.  **Completion**: Once all tools are called, the agent returns a final summary message, and the process is complete.
+
+### 6. Viewing Results
+
+-   Users (`EMPLOYER` or `FREELANCER`) can view the status of projects, milestones, and escrow accounts through various `GET` endpoints.
+-   **Endpoint**: `GET /api/milestones/:id/result` allows users to see the outcome of the AQA evaluation.
+-   **Endpoint**: `GET /api/freelancer/pfi` allows a freelancer to view their own PFI score.
+-   **Endpoint**: `GET /api/escrow/:projectId` shows the current balance of the escrow account (held, released, and refunded amounts).

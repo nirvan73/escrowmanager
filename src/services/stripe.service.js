@@ -40,35 +40,49 @@ const createEscrowPaymentIntent = async ({ projectId }) => {
 };
 
 const confirmEscrowFunded = async ({ projectId, paymentIntentId }) => {
-  const updatedEscrow = await prisma.$transaction(async (tx) => {
-    const project = await tx.project.findUnique({ where: { id: projectId } });
+  try {
+    const updatedEscrow = await prisma.$transaction(async (tx) => {
+      const project = await tx.project.findUnique({ where: { id: projectId } });
+      if (!project) throw new Error("Project not found");
 
-    const escrow = await tx.escrowAccount.update({
-      where: { projectId },
-      data: {
-        status: 'FUNDED',
-        stripePaymentIntentId: paymentIntentId,
-        heldAmount: project.budget,
-      },
+      // THE FIX: Use UPSERT so it perfectly creates the escrow row if it's missing!
+      const escrow = await tx.escrowAccount.upsert({
+        where: { projectId },
+        update: {
+          status: 'FUNDED',
+          stripePaymentIntentId: paymentIntentId,
+          heldAmount: project.budget,
+        },
+        create: {
+          projectId,
+          status: 'FUNDED',
+          stripePaymentIntentId: paymentIntentId,
+          heldAmount: project.budget,
+        }
+      });
+
+      await tx.transaction.create({
+        data: {
+          escrowAccountId: escrow.id,
+          type: 'ESCROW_FUND',
+          amount: project.budget,
+          description: `Funds secured via Stripe Intent ${paymentIntentId}`,
+        },
+      });
+
+      // Update the main project status so the Android UI updates!
+      await tx.project.update({
+        where: { id: projectId },
+        data: { status: 'FUNDED' },
+      });
+
+      return escrow;
     });
-
-    await tx.transaction.create({
-      data: {
-        escrowAccountId: escrow.id,
-        type: 'ESCROW_FUND',
-        amount: project.budget,
-        description: `Funds secured for project ${projectId}`,
-      },
-    });
-
-    await tx.project.update({
-      where: { id: projectId },
-      data: { status: 'FUNDED' },
-    });
-
-    return escrow;
-  });
-  return updatedEscrow;
+    return updatedEscrow;
+  } catch (error) {
+    console.error("Database Save Error:", error);
+    throw new Error("Failed to save payment to database.");
+  }
 };
 
 const releaseMilestonePayout = async ({ escrowAccountId, milestoneId, freelancerId, amount, description, type = 'MILESTONE_PAYOUT' }) => {
