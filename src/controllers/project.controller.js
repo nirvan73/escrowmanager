@@ -1,6 +1,6 @@
 // import { z } from 'zod';
 // import prisma from '../lib/prisma.js';
-// import geminiService from '../services/gemini.service.js';
+// import milestoneService from '../services/gemini.service.js';
 
 // const createProjectSchema = z.object({
 //   title: z.string().min(5),
@@ -19,7 +19,7 @@
 //     const projectData = createProjectSchema.parse(req.body);
 
 //     // FIX 1: Actually call Gemini and store the result
-//     const milestonesFromAI = await geminiService.decomposeProjectIntoMilestones({
+//     const milestonesFromAI = await milestoneService.decomposeProjectIntoMilestones({
 //       title: projectData.title,
 //       description: projectData.description,
 //       budget: projectData.budget,
@@ -181,7 +181,7 @@ const createProject = async (req, res) => {
     const projectData = createProjectSchema.parse(req.body);
 
     // FIX 1: Actually call Gemini and store the result
-    const milestonesFromAI = await geminiService.decomposeProjectIntoMilestones({
+    const milestonesFromAI = await milestoneService.decomposeProjectIntoMilestones({
       title: projectData.title,
       description: projectData.description,
       budget: projectData.budget,
