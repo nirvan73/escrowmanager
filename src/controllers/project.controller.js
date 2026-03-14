@@ -324,6 +324,73 @@ const getUserProjects = async (req, res) => {
   }
 };
 
+const updateProjectMilestones = async (req, res) => {
+  try {
+    const { id: projectId } = req.params;
+    const { milestones } = req.body; // Expecting an array of milestone objects
+
+    if (!Array.isArray(milestones)) {
+      return res.status(400).json({ error: 'Milestones must be an array' });
+    }
+
+    // 1. Verify Project ownership
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { employerId: true, budget: true }
+    });
+
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (project.employerId !== req.user.userId) {
+      return res.status(403).json({ error: 'Unauthorized to edit these milestones' });
+    }
+
+    // 2. Perform Transactional Update
+    const result = await prisma.$transaction(async (tx) => {
+      // Option A: Delete old milestones and re-insert new ones (Cleanest if order changes)
+      await tx.milestone.deleteMany({ where: { projectId } });
+
+      const updatedMilestones = await tx.milestone.createMany({
+        data: milestones.map((m) => ({
+          projectId,
+          order: m.order,
+          title: m.title,
+          description: m.description,
+          checklist: m.checklist || [],
+          amount: m.amount,
+          deadline: m.deadline ? new Date(m.deadline) : new Date(),
+          status: m.status || 'PENDING',
+        })),
+      });
+
+      // 3. Update Escrow total if the employer changed individual milestone amounts
+      const newTotalBudget = milestones.reduce((sum, m) => sum + (m.amount || 0), 0);
+      
+      await tx.project.update({
+        where: { id: projectId },
+        data: { budget: newTotalBudget }
+      });
+
+      await tx.escrowAccount.update({
+        where: { projectId },
+        data: { totalAmount: newTotalBudget }
+      });
+
+      return updatedMilestones;
+    });
+
+    // Fetch the final list to return to the UI
+    const finalMilestones = await prisma.milestone.findMany({
+      where: { projectId },
+      orderBy: { order: 'asc' }
+    });
+
+    res.json({ message: 'Milestones updated successfully', milestones: finalMilestones });
+  } catch (error) {
+    console.error('Update Milestones Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 const updateDeadline = async (req, res) => {
   try {
     const { id } = req.params;
@@ -365,4 +432,5 @@ export default {
   getProjectById,
   getUserProjects,
   updateDeadline,
+  updateProjectMilestones
 };

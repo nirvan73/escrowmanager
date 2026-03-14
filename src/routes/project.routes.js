@@ -8,5 +8,6 @@ router.post('/', authenticateToken, projectController.createProject);
 router.get('/:id', authenticateToken, projectController.getProjectById);
 router.get('/', authenticateToken, projectController.getUserProjects);
 router.put('/:id/deadline', authenticateToken, projectController.updateDeadline);
+router.put('/:id/milestones', authenticateToken, projectController.updateProjectMilestones);
 
 export default router;
