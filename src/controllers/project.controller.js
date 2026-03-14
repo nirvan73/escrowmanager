@@ -13,25 +13,31 @@ const createProjectSchema = z.object({
 const createProject = async (req, res) => {
     try {
         if (req.user.role !== 'EMPLOYER') return res.status(403).json({ error: 'Only employers can create projects' });
+        
         const projectData = createProjectSchema.parse(req.body);
 
+        // 1. Fetch AI-Decomposed Milestones from Groq/Gemini Service
         const milestonesFromAI = await geminiService.decomposeProjectIntoMilestones(projectData);
 
+        // 2. Identify Freelancer if an email was provided
         let freelancerId = null;
         if (projectData.freelancerEmail) {
             const freelancer = await prisma.user.findUnique({ where: { email: projectData.freelancerEmail } });
             if (freelancer?.role === 'FREELANCER') freelancerId = freelancer.id;
         }
 
+        // 3. Prepare Milestone Data for Database insertion
         const milestoneData = milestonesFromAI.map((m) => ({
             ...m,
             submissionType: m.submissionType || 'CODE',
+            // Use AI's estimatedDays to set a deadline, but we don't save the field 'estimatedDays' yet
             deadline: new Date(Date.now() + (m.estimatedDays || 7) * 86400000),
             freelancerId,
             status: freelancerId ? 'ASSIGNED' : 'PENDING',
         }));
 
-        const { project } = await prisma.$transaction(async (tx) => {
+        // 4. Atomic Transaction: Create Project, Milestones, and Escrow in one go
+        const result = await prisma.$transaction(async (tx) => {
             const proj = await tx.project.create({
                 data: {
                     title: projectData.title,
@@ -42,20 +48,41 @@ const createProject = async (req, res) => {
                 },
             });
 
+            // FIX 1: Strip 'estimatedDays' from AI response using destructuring
+            // Prisma throws an error if it sees a field that isn't in schema.prisma
             await tx.milestone.createMany({
-                data: milestoneData.map((m) => ({ ...m, projectId: proj.id })),
+                data: milestoneData.map((m) => {
+                    const { estimatedDays, ...prismaReadyData } = m; 
+                    return { 
+                        ...prismaReadyData, 
+                        projectId: proj.id 
+                    };
+                }),
             });
 
+            // FIX 2: Explicitly provide 'heldAmount: 0' (Prisma requires Float fields)
             await tx.escrowAccount.create({
-                data: { projectId: proj.id, totalAmount: projectData.budget, status: 'UNFUNDED' },
+                data: { 
+                    projectId: proj.id, 
+                    totalAmount: projectData.budget, 
+                    heldAmount: 0, 
+                    status: 'UNFUNDED' 
+                },
             });
 
             return { project: proj };
         });
 
-        const milestones = await prisma.milestone.findMany({ where: { projectId: project.id }, orderBy: { order: 'asc' } });
-        res.status(201).json({ project, milestones });
+        // 5. Fetch the newly created milestones to return to the Android App
+        const finalMilestones = await prisma.milestone.findMany({ 
+            where: { projectId: result.project.id }, 
+            orderBy: { order: 'asc' } 
+        });
+
+        res.status(201).json({ project: result.project, milestones: finalMilestones });
+
     } catch (error) {
+        console.error("Project Creation Error:", error.message);
         res.status(500).json({ error: error.message });
     }
 };
@@ -71,6 +98,7 @@ const updateProjectMilestones = async (req, res) => {
         await prisma.$transaction(async (tx) => {
             // Delete AI suggestions and replace with employer's approved/edited versions
             await tx.milestone.deleteMany({ where: { projectId } });
+            
             await tx.milestone.createMany({
                 data: milestones.map((m) => ({
                     projectId,
@@ -87,10 +115,19 @@ const updateProjectMilestones = async (req, res) => {
 
             // Recalculate and update the budget/escrow
             const finalBudget = milestones.reduce((sum, m) => sum + m.amount, 0);
-            await tx.project.update({ where: { id: projectId }, data: { budget: finalBudget } });
+            
+            await tx.project.update({ 
+                where: { id: projectId }, 
+                data: { budget: finalBudget } 
+            });
+
             await tx.escrowAccount.update({
                 where: { projectId },
-                data: { status: 'FUNDED', totalAmount: finalBudget, heldAmount: finalBudget }
+                data: { 
+                    status: 'FUNDED', 
+                    totalAmount: finalBudget, 
+                    heldAmount: finalBudget 
+                }
             });
         });
 
@@ -106,7 +143,10 @@ const getProjectById = async (req, res) => {
         const project = await prisma.project.findUnique({
             where: { id },
             include: {
-                milestones: { orderBy: { order: 'asc' }, include: { submissions: { orderBy: { createdAt: 'desc' }, take: 1 } } },
+                milestones: { 
+                    orderBy: { order: 'asc' }, 
+                    include: { submissions: { orderBy: { createdAt: 'desc' }, take: 1 } } 
+                },
                 escrowAccount: true,
                 employer: { select: { id: true, name: true, email: true } },
             },
@@ -150,4 +190,10 @@ const updateDeadline = async (req, res) => {
     }
 };
 
-export default { createProject, getProjectById, getUserProjects, updateDeadline, updateProjectMilestones };
+export default { 
+    createProject, 
+    getProjectById, 
+    getUserProjects, 
+    updateDeadline, 
+    updateProjectMilestones 
+};
