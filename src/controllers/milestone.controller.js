@@ -8,6 +8,13 @@ const submitMilestone = async (req, res) => {
     const milestone = await prisma.milestone.findUnique({ where: { id: milestoneId } });
     if (!milestone) return res.status(404).json({ error: 'Milestone not found' });
 
+    // Add this block
+if (['UNDER_REVIEW', 'APPROVED', 'PARTIAL'].includes(milestone.status)) {
+  return res.status(400).json({ 
+    error: `Milestone cannot be submitted with status: ${milestone.status}` 
+  });
+}
+
     // Validation Logic Based on SubmissionType Tag
     if (milestone.submissionType === 'CODE') {
         if (!repoUrl || !repoUrl.includes('github.com')) {
